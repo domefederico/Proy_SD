@@ -4,12 +4,14 @@ FROM maven:3.8.6-openjdk-11-slim AS build
 # Establecer directorio de trabajo
 WORKDIR /app
 
-# Copiar archivos comunes primero (common)
-COPY ../../common /app/common
+# Copiar pom.xml primero (para aprovechar caché de Docker)
+COPY producers/sender-signals/pom.xml /app/
 
-# Copiar pom.xml y archivos fuente del productor
-COPY pom.xml /app/
-COPY src /app/src
+# Copiar archivos fuente del productor
+COPY producers/sender-signals/src /app/src
+
+# Copiar archivos comunes desde la raíz del proyecto a la estructura Maven
+COPY common/*.java /app/src/main/java/com/example/common/
 
 # Compilar la aplicación
 RUN mvn clean package -DskipTests

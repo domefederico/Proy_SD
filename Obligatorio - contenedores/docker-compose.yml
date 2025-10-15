@@ -10,12 +10,14 @@ services:
       RABBITMQ_DEFAULT_PASS: pass
 
   sender-signals:
-    build: ./producers
+    build:
+      context: .
+      dockerfile: ./producers/sender-signals/Dockerfile
     depends_on: [rabbitmq]
 
-
-
   consumer-signals:
-    build: ./consumers/consumer-signals
+    build:
+      context: .
+      dockerfile: ./consumers/consumer-signals/Dockerfile
     depends_on: [rabbitmq]
 
