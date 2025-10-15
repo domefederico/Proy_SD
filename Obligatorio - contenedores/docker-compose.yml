@@ -10,7 +10,7 @@ services:
       RABBITMQ_DEFAULT_PASS: pass
 
   sender-signals:
-    build: ./producers/sender-signals
+    build: ./producers
     depends_on: [rabbitmq]
 
 
