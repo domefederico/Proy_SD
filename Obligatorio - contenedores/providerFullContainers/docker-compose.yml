@@ -1,0 +1,23 @@
+version: "3.8"
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: mi_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+    ports:
+      - "5432:5432"
+
+  buscador:
+    build: .
+    depends_on:
+      - rabbitmq
+      - db
