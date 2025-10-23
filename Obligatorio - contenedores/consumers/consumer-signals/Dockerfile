@@ -1,5 +1,5 @@
 # Etapa 1: Construcción (build stage)
-FROM maven:3.8.6-openjdk-11-slim AS build
+FROM maven:3.9.9-eclipse-temurin-21-alpine AS build
 
 # Establecer directorio de trabajo
 WORKDIR /app
@@ -21,7 +21,7 @@ WORKDIR /app/consumer-signals
 RUN mvn clean package -DskipTests
 
 # Etapa 2: Ejecución (runtime stage)
-FROM openjdk:11-jre-slim
+FROM eclipse-temurin:21-jre-alpine
 
 # Establecer directorio de trabajo
 WORKDIR /app

@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   rabbitmq:
     image: rabbitmq:3-management
@@ -8,6 +7,17 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: user
       RABBITMQ_DEFAULT_PASS: pass
+
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: mi_base
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
 
   sender-signals:
     build:
@@ -19,5 +29,23 @@ services:
     build:
       context: .
       dockerfile: ./consumers/consumer-signals/Dockerfile
+    depends_on: [rabbitmq]
+
+  provider-full-containers:
+    build:
+      context: .
+      dockerfile: ./producers/providerFullContainers/Dockerfile
+    depends_on:
+      - rabbitmq
+      - db
+
+  consumer-full-containers:
+    build:
+      context: ./consumers/consumerFullContainers
+    depends_on: [rabbitmq]
+
+  consumer-containers-to-clean:
+    build:
+      context: ./consumers/consumerContainersToClean
     depends_on: [rabbitmq]
 

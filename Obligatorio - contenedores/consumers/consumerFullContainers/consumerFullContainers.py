@@ -4,12 +4,18 @@ import openrouteservice
 import numpy as np
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
-QUEUE_NAME = "fullContainers"
+QUEUE_NAME = "fullcontainers"
+OUTPUT_QUEUE_NAME = "containerstoclean"
 RABBITMQ_HOST = "rabbitmq"  # usa "localhost" si no estás en Docker
+RABBITMQ_USER = "user"
+RABBITMQ_PASS = "pass"
 API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImQ5ODY2YmExYTMxZjQxNzlhMmQzMmJhOTE1NDRkYzM2IiwiaCI6Im11cm11cjY0In0="
 
 # 📦 Almacén temporal de contenedores recibidos
 ubicaciones = []
+
+# Variable global para el canal de RabbitMQ (para publicar la ruta)
+channel = None
 
 # =============================
 # FUNCIONES AUXILIARES
@@ -58,32 +64,64 @@ def ruta_optima(matriz_tiempo, punto_inicio=0):
 # =============================
 
 def callback(ch, method, properties, body):
+    global channel
     message = body.decode("utf-8")
     try:
         data = json.loads(message)
         # Si el id = -1 → ejecutar cálculo de ruta
         if data.get("id") == -1:
             if len(ubicaciones) < 2:
-                print("⚠️ No hay suficientes ubicaciones para calcular una ruta.")
+                print("⚠️  No hay suficientes ubicaciones para calcular una ruta.")
                 return
-            print("\n🧭 Calculando ruta óptima...")
+            
+            print("\n═══════════════════════════════════════════════════════")
+            print("  🧭 CALCULANDO RUTA ÓPTIMA")
+            print(f"  📦 Contenedores a visitar: {len(ubicaciones)}")
+            print("═══════════════════════════════════════════════════════")
+            
             try:
                 matriz = matriz_tiempo_ors(API_KEY, ubicaciones)
                 ruta, tiempo_total = ruta_optima(matriz)
                 if ruta:
-                    print("\n🗺️ Ruta óptima calculada:")
-                    for i in ruta:
-                        print(f"→ ID: {ubicaciones[i]['id']}")
-                    print(f"\n⏱️ Tiempo total estimado: {tiempo_total/60:.2f} minutos\n")
+                    print("\n🗺️  RUTA ÓPTIMA CALCULADA:")
+                    ruta_optimizada = []
+                    for idx, i in enumerate(ruta, 1):
+                        porcentaje = ubicaciones[i].get('porcentaje', '?')
+                        print(f"  {idx}. Contenedor {ubicaciones[i]['id']:2d} | {porcentaje}% | ({ubicaciones[i]['latitud']:.4f}, {ubicaciones[i]['longitud']:.4f})")
+                        ruta_optimizada.append({
+                            "id": ubicaciones[i]['id'],
+                            "latitud": ubicaciones[i]['latitud'],
+                            "longitud": ubicaciones[i]['longitud'],
+                            "porcentaje": porcentaje
+                        })
+                    print(f"\n⏱️  Tiempo total estimado: {tiempo_total/60:.2f} minutos")
+                    
+                    # Publicar la ruta óptima a la cola containerstoclean
+                    route_message = {
+                        "ruta": ruta_optimizada,
+                        "tiempo_total_segundos": tiempo_total,
+                        "tiempo_total_minutos": round(tiempo_total/60, 2),
+                        "cantidad_contenedores": len(ruta_optimizada)
+                    }
+                    channel.basic_publish(
+                        exchange='',
+                        routing_key=OUTPUT_QUEUE_NAME,
+                        body=json.dumps(route_message)
+                    )
+                    print(f"\n✅ Ruta publicada a cola '{OUTPUT_QUEUE_NAME}'")
+                    print("═══════════════════════════════════════════════════════\n")
+                    
+                    # Limpiar ubicaciones para la próxima ruta
+                    ubicaciones.clear()
                 else:
-                    print("❌ No se pudo resolver el TSP.")
+                    print("❌ No se pudo resolver el problema de optimización.")
             except Exception as e:
-                print(f"⚠️ Error al calcular la ruta: {e}")
+                print(f"⚠️  Error al calcular la ruta: {e}")
         else:
             # Guardar el contenedor recibido
+            porcentaje = data.get('porcentaje', '?')
             ubicaciones.append(data)
-            print(f"📦 Contenedor recibido -> ID: {data['id']}, "
-                  f"Latitud: {data['latitud']}, Longitud: {data['longitud']}")
+            print(f" [✓] Contenedor {data['id']:2d} | {porcentaje}% | ({data['latitud']:.4f}, {data['longitud']:.4f}) - Recibido")
     except json.JSONDecodeError:
         print(f"Mensaje recibido (no JSON): {message}")
 
@@ -92,12 +130,24 @@ def callback(ch, method, properties, body):
 # =============================
 
 def main():
-    connection = pika.BlockingConnection(pika.ConnectionParameters(host=RABBITMQ_HOST))
+    global channel
+    credentials = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    connection = pika.BlockingConnection(
+        pika.ConnectionParameters(host=RABBITMQ_HOST, credentials=credentials)
+    )
     channel = connection.channel()
+    
+    # Declarar las colas: entrada y salida
     channel.queue_declare(queue=QUEUE_NAME, durable=False)
+    channel.queue_declare(queue=OUTPUT_QUEUE_NAME, durable=False)
+    
     channel.basic_consume(queue=QUEUE_NAME, on_message_callback=callback, auto_ack=True)
 
-    print(f" [*] Esperando mensajes en '{QUEUE_NAME}'. Presiona CTRL+C para salir.")
+    print("═══════════════════════════════════════════════════════")
+    print("  🧭 CALCULADOR DE RUTA ÓPTIMA - Iniciado")
+    print(f"  📥 Consumiendo de cola: {QUEUE_NAME}")
+    print(f"  📤 Publicando rutas a cola: {OUTPUT_QUEUE_NAME}")
+    print("═══════════════════════════════════════════════════════")
     channel.start_consuming()
 
 if __name__ == "__main__":
