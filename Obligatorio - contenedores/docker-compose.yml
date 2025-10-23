@@ -7,6 +7,12 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: user
       RABBITMQ_DEFAULT_PASS: pass
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+      start_period: 10s
 
   db:
     image: postgres:15
@@ -18,34 +24,58 @@ services:
       - "5432:5432"
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
 
   sender-signals:
     build:
       context: .
       dockerfile: ./producers/sender-signals/Dockerfile
-    depends_on: [rabbitmq]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
 
   consumer-signals:
     build:
       context: .
       dockerfile: ./consumers/consumer-signals/Dockerfile
-    depends_on: [rabbitmq]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
 
   provider-full-containers:
     build:
       context: .
       dockerfile: ./producers/providerFullContainers/Dockerfile
     depends_on:
-      - rabbitmq
-      - db
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
 
   consumer-full-containers:
     build:
       context: ./consumers/consumerFullContainers
-    depends_on: [rabbitmq]
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
 
-  consumer-containers-to-clean:
+  app:
     build:
-      context: ./consumers/consumerContainersToClean
-    depends_on: [rabbitmq]
+      context: .
+      dockerfile: ./app/Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    environment:
+      - NODE_ENV=production
+
 

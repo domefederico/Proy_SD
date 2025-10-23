@@ -59,6 +59,13 @@ public class ProviderFullContainers {
                 System.out.println("═══════════════════════════════════════════════════════");
                 System.out.printf("  📤 Total publicados: %d contenedores a cola '%s'%n", count, QueueNames.FULL_CONTAINERS);
                 System.out.println("═══════════════════════════════════════════════════════");
+
+                // --- 5. Enviar señal para activar el cálculo de ruta ---
+                if (count > 0) {
+                    String signal = "{\"id\": -1}";
+                    channel.basicPublish("", QueueNames.FULL_CONTAINERS, null, signal.getBytes("UTF-8"));
+                    System.out.println("\n🚀 Señal de cálculo enviada (id: -1)");
+                }
             }
         }
     }
