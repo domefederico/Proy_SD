@@ -4,50 +4,159 @@ Sistema distribuido para la gestión inteligente de contenedores de basura utili
 
 ---
 
-## 🏗️ Arquitectura del Sistema
+## 🚀 Inicio Rápido
 
-### Componentes Principales
+### 1. Levantar el sistema
+```bash
+docker compose up -d
+```
 
-#### 1. **Cola `signals`** - Simulación de Sensores
-- **Producer (Java)**: `sender-signals` - Simula 15 sensores de contenedores enviando datos (ID, latitud, longitud, porcentaje de llenado)
-- **Consumer (Java)**: `consumer-signals` - Recibe señales y las almacena en PostgreSQL usando INSERT ON CONFLICT
+### 2. Acceder a la aplicación
+- **Aplicación Web**: http://localhost:3000
+- **RabbitMQ Management**: http://localhost:15672 (user: `user`, pass: `pass`)
 
-#### 2. **Cola `fullcontainers`** - Contenedores Llenos
-- **Provider (Java)**: `provider-full-containers` - Consulta PostgreSQL y publica contenedores con ≥75% de llenado
-- **Consumer (Python)**: `consumer-full-containers` - Calcula rutas óptimas usando OpenRouteService y OR-Tools
-
-#### 3. **Cola `containerstoclean`** - Rutas Calculadas
-- **Consumer (Python)**: `consumer-containers-to-clean` - Muestra las rutas calculadas para los conductores
-
-#### 4. **Aplicación Web** - Visualización
-- **Frontend (React + Vite)**: Interfaz con mapa interactivo (Leaflet) para visualizar rutas
-- **Backend (Node.js + Express)**: API REST que consume mensajes de RabbitMQ y los expone al frontend
-- **Nginx**: Servidor web y proxy reverso
-- **Supervisor**: Gestiona múltiples procesos en un contenedor
+### 3. Usar la aplicación
+1. Abre http://localhost:3000
+2. Presiona el botón **"Comenzar"**
+3. Espera 10-15 segundos mientras se calcula la ruta
+4. Navega por los contenedores con el botón **"Siguiente Contenedor"**
+5. Al finalizar, presiona **"Finalizar Ruta"**
 
 ---
 
-## 🔄 Flujo de Punta a Punta
+## 📖 Documentación
 
-1. **Simulación de Sensores**: `sender-signals` genera 15 contenedores con ubicaciones y porcentajes aleatorios
-2. **Almacenamiento**: `consumer-signals` guarda los datos en PostgreSQL (tabla `contenedores`)
-3. **Detección de Llenos**: `provider-full-containers` consulta contenedores con ≥75% y los publica
-4. **Optimización de Ruta**: `consumer-full-containers` calcula la ruta óptima usando algoritmos de OR-Tools
-5. **Notificación**: La ruta calculada se publica en `containerstoclean`
-6. **Visualización**: El backend recibe la ruta y el frontend la muestra en un mapa interactivo
+Para información detallada sobre la arquitectura, componentes y flujo del sistema, consulta:
+
+### [📘 ARQUITECTURA.md](./ARQUITECTURA.md)
+
+Este documento incluye:
+- 🏛️ Diagrama de arquitectura completo
+- ⚡ Flujo automático paso a paso
+- 🟢 Componentes activos vs legacy
+- 📨 Estructura de mensajes en colas
+- 🔧 Guía de desarrollo
+- 📊 Stack tecnológico
 
 ---
 
-## 📂 Estructura del Proyecto
+## 🎯 Características Principales
+
+✅ **Flujo Automático**: Un solo clic inicia todo el proceso  
+✅ **Selección Aleatoria**: Cada ejecución selecciona 8 contenedores diferentes  
+✅ **Ruta Óptima**: Cálculo con algoritmos OR-Tools  
+✅ **Mapa Interactivo**: Visualización en tiempo real con Leaflet  
+✅ **Múltiples Ejecuciones**: Sin necesidad de reiniciar contenedores  
+✅ **Persistencia de Datos**: RabbitMQ y PostgreSQL con volúmenes persistentes
+
+---
+
+## 🛠️ Comandos Útiles
+
+### Ver logs
+```bash
+# Backend + Frontend
+docker logs obligatorio-contenedores-app-1 -f
+
+# Consumer de señales (Java)
+docker logs obligatorio-contenedores-consumer-signals-1 -f
+
+# Consumer de rutas (Python)
+docker logs obligatorio-contenedores-consumer-full-containers-1 -f
+```
+
+### Consultar base de datos
+```bash
+docker exec -it obligatorio-contenedores-db-1 psql -U postgres -d mi_base -c "SELECT id, porcentaje FROM contenedores ORDER BY porcentaje DESC;"
+```
+
+### Resetear contenedores a 0%
+```bash
+docker exec -it obligatorio-contenedores-db-1 psql -U postgres -d mi_base -c "UPDATE contenedores SET porcentaje = 0;"
+```
+
+### Reconstruir aplicación
+```bash
+docker compose build app
+docker compose up -d app
+```
+
+### Detener todo
+```bash
+docker compose down
+```
+
+### Eliminar volúmenes (reset completo)
+```bash
+docker compose down -v
+```
+
+**Nota**: Los volúmenes persisten datos de RabbitMQ y PostgreSQL entre reinicios. Usa `-v` solo si quieres eliminar todos los datos.
+
+---
+
+## 🏗️ Arquitectura Simplificada
 
 ```
-Obligatorio - contenedores/
-├── app/
-│   ├── backend/              # API Node.js + Express
-│   │   ├── server.js         # Servidor que consume RabbitMQ
-│   │   └── package.json
-│   ├── frontend/             # React + Vite + Leaflet
-│   │   ├── src/
+Usuario → Frontend React → Backend Node.js → RabbitMQ → Consumers (Java/Python) → PostgreSQL
+                              ↓                            ↓
+                         Providers JS              Cálculo de Rutas
+                                                           ↓
+                                                     Mapa Interactivo
+```
+
+---
+
+## 📦 Servicios Activos
+
+| Servicio | Tecnología | Puerto | Función | Persistencia |
+|----------|-----------|--------|---------|--------------|
+| `app` | Node.js + React | 3000 | Frontend + Backend API | - |
+| `consumer-signals` | Java 11+ | - | Procesa señales de sensores | - |
+| `consumer-full-containers` | Python 3.9+ | - | Calcula rutas óptimas | - |
+| `db` | PostgreSQL 15 | 5432 | Base de datos | ✅ Volume |
+| `rabbitmq` | RabbitMQ 3 | 5672, 15672 | Message broker | ✅ Volume |
+
+---
+
+## 🔧 Desarrollo
+
+### Modificar Backend
+```bash
+# Editar archivos en app/backend/
+docker compose build app && docker compose up -d app
+```
+
+### Modificar Frontend
+```bash
+# Editar archivos en app/frontend/src/
+docker compose build app && docker compose up -d app
+```
+
+---
+
+## � Tecnologías
+
+- **Frontend**: React 18 + Vite + Leaflet
+- **Backend**: Node.js 20 + Express + amqplib + pg
+- **Consumers**: Java (signals) + Python (routes/OR-Tools)
+- **Infraestructura**: RabbitMQ + PostgreSQL + Docker
+
+---
+
+## 📝 Notas
+
+- El sistema **garantiza 8 contenedores llenos** en cada ejecución
+- Los contenedores se seleccionan **aleatoriamente** cada vez
+- Soporta **múltiples ejecuciones** sin reiniciar
+- El mapa es **fijo** (no se mueve automáticamente)
+
+---
+
+## 📄 Licencia
+
+Este proyecto es parte de un trabajo académico.
+
 │   │   │   ├── App.jsx       # Componente principal con mapa
 │   │   │   └── components/   # ControlPanel, MapView
 │   │   └── package.json

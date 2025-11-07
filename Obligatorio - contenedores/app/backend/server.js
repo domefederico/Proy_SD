@@ -1,13 +1,15 @@
 import express from 'express';
 import cors from 'cors';
-import amqp from 'amqplib';
+import pg from 'pg';
+import { ejecutarSenderSignals } from './providers/senderSignals.js';
+import { ejecutarProviderFullContainers } from './providers/providerFullContainers.js';
+import { iniciarConsumerRutas } from './services/routeConsumer.js';
+import { DB_CONFIG } from './config/database.js';
+
+const { Client } = pg;
 
 const app = express();
 const PORT = 4000;
-
-// Configuración de RabbitMQ
-const RABBITMQ_URL = 'amqp://user:pass@rabbitmq:5672';
-const QUEUE_NAME = 'containerstoclean';
 
 // Variable global para almacenar la última ruta calculada
 let ultimaRuta = null;
@@ -15,49 +17,6 @@ let ultimaRuta = null;
 // Middleware
 app.use(cors());
 app.use(express.json());
-
-// ============================================
-// CONSUMER DE RABBITMQ EN SEGUNDO PLANO
-// ============================================
-async function iniciarConsumerRabbitMQ() {
-  try {
-    console.log('🐰 Conectando a RabbitMQ...');
-    const connection = await amqp.connect(RABBITMQ_URL);
-    const channel = await connection.createChannel();
-    
-    await channel.assertQueue(QUEUE_NAME, { durable: false });
-    
-    console.log(`✅ Escuchando cola: ${QUEUE_NAME}`);
-    console.log('📥 Esperando rutas calculadas...\n');
-    
-    channel.consume(QUEUE_NAME, (msg) => {
-      if (msg !== null) {
-        const mensaje = msg.content.toString();
-        
-        try {
-          const ruta = JSON.parse(mensaje);
-          ultimaRuta = ruta;
-          
-          console.log('═══════════════════════════════════════════');
-          console.log('🗺️  NUEVA RUTA RECIBIDA');
-          console.log('═══════════════════════════════════════════');
-          console.log(`📦 Contenedores: ${ruta.cantidad_contenedores}`);
-          console.log(`⏱️  Tiempo: ${ruta.tiempo_total_minutos} minutos`);
-          console.log('═══════════════════════════════════════════\n');
-          
-        } catch (error) {
-          console.error('❌ Error parseando mensaje:', error);
-        }
-        
-        channel.ack(msg);
-      }
-    });
-  } catch (error) {
-    console.error('❌ Error conectando a RabbitMQ:', error.message);
-    console.log('🔄 Reintentando en 5 segundos...');
-    setTimeout(iniciarConsumerRabbitMQ, 5000);
-  }
-}
 
 // ============================================
 // ENDPOINTS REST API
@@ -118,6 +77,133 @@ app.get('/api/health', (req, res) => {
   });
 });
 
+// POST /api/ruta/completar - Finalizar ruta y vaciar contenedores
+app.post('/api/ruta/completar', async (req, res) => {
+  try {
+    if (!ultimaRuta || !ultimaRuta.ruta) {
+      return res.status(404).json({
+        success: false,
+        message: 'No hay ruta activa para completar'
+      });
+    }
+
+    console.log('\n═══════════════════════════════════════════');
+    console.log('🏁 FINALIZANDO RUTA');
+    console.log('═══════════════════════════════════════════\n');
+
+    // Obtener los IDs de los contenedores de la ruta
+    const contenedorIds = ultimaRuta.ruta.map(c => c.id);
+    
+    console.log(`📦 Vaciando ${contenedorIds.length} contenedores: [${contenedorIds.join(', ')}]`);
+
+    // Conectar a la base de datos
+    const dbClient = new Client(DB_CONFIG);
+    await dbClient.connect();
+
+    try {
+      // Actualizar porcentaje a 0 para todos los contenedores de la ruta
+      const query = `
+        UPDATE contenedores 
+        SET porcentaje = 0 
+        WHERE id = ANY($1::int[])
+        RETURNING id, porcentaje
+      `;
+      
+      const result = await dbClient.query(query, [contenedorIds]);
+
+      console.log(`✅ ${result.rowCount} contenedores vaciados exitosamente\n`);
+
+      // Mostrar detalles
+      result.rows.forEach(row => {
+        console.log(`  🗑️  Contenedor ${row.id}: ${row.porcentaje}%`);
+      });
+
+      console.log('\n═══════════════════════════════════════════\n');
+
+      // Limpiar la ruta actual
+      ultimaRuta = null;
+
+      res.json({
+        success: true,
+        message: `Ruta completada. ${result.rowCount} contenedores vaciados.`,
+        contenedoresVaciados: result.rows
+      });
+
+    } finally {
+      await dbClient.end();
+    }
+
+  } catch (error) {
+    console.error('\n❌ ERROR FINALIZANDO RUTA:', error.message);
+    console.error('═══════════════════════════════════════════\n');
+    res.status(500).json({
+      success: false,
+      message: 'Error al completar la ruta',
+      error: error.message
+    });
+  }
+});
+
+// POST /api/iniciar-flujo - Iniciar todo el flujo automáticamente
+app.post('/api/iniciar-flujo', async (req, res) => {
+  try {
+    console.log('\n═══════════════════════════════════════════');
+    console.log('🚀 INICIANDO FLUJO AUTOMÁTICO DESDE BACKEND');
+    console.log('═══════════════════════════════════════════\n');
+
+    // Limpiar ruta anterior
+    ultimaRuta = null;
+
+    // Paso 1: Ejecutar sender-signals (envía 15 señales a la cola)
+    console.log('📡 Paso 1/3: Ejecutando sender-signals...');
+    await ejecutarSenderSignals();
+    console.log('✅ Sender-signals completado\n');
+
+    // Esperar a que consumer-signals procese las señales
+    console.log('⏳ Esperando procesamiento de señales (5 segundos)...');
+    await new Promise(resolve => setTimeout(resolve, 5000));
+
+    // Paso 2: Ejecutar provider-full-containers (consulta BD y envía contenedores)
+    console.log('🗄️ Paso 2/3: Ejecutando provider-full-containers...');
+    const cantidadEnviada = await ejecutarProviderFullContainers();
+    console.log(`✅ Provider-full-containers completado (${cantidadEnviada} contenedores)\n`);
+
+    // Paso 3: Esperar a que se calcule la ruta (máximo 30 segundos)
+    console.log('⏳ Paso 3/3: Esperando cálculo de ruta óptima...');
+    let intentos = 0;
+    while (!ultimaRuta && intentos < 30) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      intentos++;
+      if (intentos % 5 === 0) {
+        console.log(`  ⏱️  ${intentos} segundos transcurridos...`);
+      }
+    }
+
+    if (ultimaRuta) {
+      console.log('✅ ¡Ruta calculada exitosamente!\n');
+      console.log(`📊 Resultado: ${ultimaRuta.ruta.length} contenedores, ${ultimaRuta.tiempo_total_minutos} minutos\n`);
+      console.log('═══════════════════════════════════════════\n');
+      
+      res.json({
+        success: true,
+        message: 'Flujo completado exitosamente',
+        ruta: ultimaRuta
+      });
+    } else {
+      throw new Error('Timeout: La ruta no se calculó en el tiempo esperado (30s)');
+    }
+
+  } catch (error) {
+    console.error('\n❌ ERROR EN EL FLUJO:', error.message);
+    console.error('═══════════════════════════════════════════\n');
+    res.status(500).json({
+      success: false,
+      message: 'Error ejecutando el flujo',
+      error: error.message
+    });
+  }
+});
+
 // ============================================
 // INICIAR SERVIDOR
 // ============================================
@@ -128,6 +214,8 @@ app.listen(PORT, () => {
   console.log(`🌐 URL: http://localhost:${PORT}`);
   console.log('═══════════════════════════════════════════\n');
   
-  // Iniciar consumer de RabbitMQ
-  iniciarConsumerRabbitMQ();
+  // Iniciar consumer de RabbitMQ para escuchar rutas
+  iniciarConsumerRutas((ruta) => {
+    ultimaRuta = ruta;
+  });
 });

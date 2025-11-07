@@ -111,8 +111,9 @@ def callback(ch, method, properties, body):
                     print(f"\n✅ Ruta publicada a cola '{OUTPUT_QUEUE_NAME}'")
                     print("═══════════════════════════════════════════════════════\n")
                     
-                    # Limpiar ubicaciones para la próxima ruta
+                    # ✅ CAMBIO: Limpiar ubicaciones DESPUÉS de publicar para estar listos para el próximo flujo
                     ubicaciones.clear()
+                    print("🔄 Listo para recibir nuevo flujo de contenedores\n")
                 else:
                     print("❌ No se pudo resolver el problema de optimización.")
             except Exception as e:
