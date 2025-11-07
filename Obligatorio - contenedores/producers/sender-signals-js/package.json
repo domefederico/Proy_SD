@@ -1,0 +1,13 @@
+{
+  "name": "sender-signals",
+  "version": "1.0.0",
+  "description": "Servicio que genera señales de sensores IoT",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.3"
+  }
+}

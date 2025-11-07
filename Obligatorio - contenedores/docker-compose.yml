@@ -1,4 +1,8 @@
 services:
+  # ============================================
+  # INFRAESTRUCTURA
+  # ============================================
+  
   rabbitmq:
     image: rabbitmq:3-management
     ports:
@@ -33,26 +37,76 @@ services:
       retries: 5
       start_period: 5s
 
+  # ============================================
+  # FRONTEND (React + Nginx)
+  # ============================================
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+
+  # ============================================
+  # BACKEND (API REST - Node.js)
+  # ============================================
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "3001:3001"
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - DB_HOST=db
+      - DB_USER=postgres
+      - DB_PASSWORD=1234
+      - DB_NAME=mi_base
+
+  # ============================================
+  # PRODUCERS (Generan datos y los publican)
+  # ============================================
+
   sender-signals:
     build:
-      context: .
-      dockerfile: ./producers/sender-signals/Dockerfile
+      context: ./producers/sender-signals-js
+      dockerfile: Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
+    environment:
+      - RABBITMQ_URL=amqp://user:pass@rabbitmq:5672
+
+  provider-full-containers:
+    build:
+      context: ./producers/provider-full-containers-js
+      dockerfile: Dockerfile
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      db:
+        condition: service_healthy
+    environment:
+      - RABBITMQ_URL=amqp://user:pass@rabbitmq:5672
+      - DB_HOST=db
+      - DB_USER=postgres
+      - DB_PASSWORD=1234
+      - DB_NAME=mi_base
+
+  # ============================================
+  # CONSUMERS (Consumen y procesan datos)
+  # ============================================
 
   consumer-signals:
     build:
       context: .
       dockerfile: ./consumers/consumer-signals/Dockerfile
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-
-  provider-full-containers:
-    build:
-      context: .
-      dockerfile: ./producers/providerFullContainers/Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -66,19 +120,22 @@ services:
       rabbitmq:
         condition: service_healthy
 
-  app:
+  route-consumer:
     build:
-      context: .
-      dockerfile: ./app/Dockerfile
-    ports:
-      - "3000:80"
+      context: ./consumers/route-consumer-js
+      dockerfile: Dockerfile
     depends_on:
       rabbitmq:
         condition: service_healthy
       db:
         condition: service_healthy
     environment:
-      - NODE_ENV=production
+      - RABBITMQ_URL=amqp://user:pass@rabbitmq:5672
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=mi_base
+      - DB_USER=postgres
+      - DB_PASSWORD=1234
 
 volumes:
   rabbitmq_data:

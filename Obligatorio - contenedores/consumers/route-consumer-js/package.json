@@ -1,0 +1,14 @@
+{
+  "name": "route-consumer",
+  "version": "1.0.0",
+  "description": "Servicio que escucha rutas calculadas",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.3",
+    "pg": "^8.11.3"
+  }
+}

@@ -19,6 +19,15 @@ INSERT INTO contenedores (latitud, longitud, porcentaje) VALUES
     (-34.8922, -56.1688, 25),  -- Contenedor bajo
     (-34.9044, -56.1599, 82);  -- Contenedor lleno
 
+-- Tabla para almacenar las rutas calculadas
+CREATE TABLE IF NOT EXISTS rutas (
+    id SERIAL PRIMARY KEY,
+    cantidad_contenedores INTEGER NOT NULL,
+    tiempo_total_minutos DOUBLE PRECISION NOT NULL,
+    ruta JSONB NOT NULL,
+    fecha_calculo TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- Verificar datos insertados
 SELECT COUNT(*) as total_contenedores FROM contenedores;
 SELECT COUNT(*) as contenedores_llenos FROM contenedores WHERE porcentaje >= 75;

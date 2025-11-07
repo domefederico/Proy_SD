@@ -1,453 +1,812 @@
-# 🏗️ Arquitectura del Sistema - Gestión de Contenedores
+# 🏗️ Arquitectura del Sistema EmptyTrash
 
 ## 📋 Tabla de Contenidos
-- [Visión General](#visión-general)
-- [Arquitectura Actual](#arquitectura-actual)
-- [Flujo Automático](#flujo-automático)
-- [Componentes Activos](#componentes-activos)
-- [Componentes Legacy](#componentes-legacy)
-- [Colas de RabbitMQ](#colas-de-rabbitmq)
-- [Inicio Rápido](#inicio-rápido)
+- [Visión General](#-visión-general)
+- [Arquitectura del Sistema](#-arquitectura-del-sistema)
+- [Flujo de Datos Detallado](#-flujo-de-datos-detallado)
+- [Componentes del Sistema](#-componentes-del-sistema)
+- [Comunicación Entre Servicios](#-comunicación-entre-servicios)
+- [Base de Datos](#-base-de-datos)
+- [Colas de RabbitMQ](#-colas-de-rabbitmq)
+- [Decisiones de Diseño](#-decisiones-de-diseño)
 
 ---
 
 ## 🎯 Visión General
 
-Sistema distribuido para la gestión inteligente de contenedores de basura con:
-- ✅ Simulación de sensores IoT
-- ✅ Cálculo automático de rutas óptimas
-- ✅ Visualización en tiempo real con mapa interactivo
-- ✅ Arquitectura de microservicios con RabbitMQ
+**EmptyTrash** es un sistema distribuido de gestión inteligente de contenedores de basura que combina:
+
+- 🤖 **Simulación IoT**: Generación automática de datos de sensores cada 30 segundos
+- 🗺️ **Optimización de Rutas**: Cálculo de rutas óptimas usando Google OR-Tools
+- 📊 **Visualización en Tiempo Real**: Interfaz web interactiva con mapas Leaflet
+- 🔄 **Arquitectura de Microservicios**: Servicios desacoplados comunicados vía RabbitMQ
+- 💾 **Persistencia**: PostgreSQL para datos y RabbitMQ para mensajería
 
 ---
 
-## 🏛️ Arquitectura Actual
+## 🏛️ Arquitectura del Sistema
+
+### Diagrama de Alto Nivel
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         FLUJO AUTOMÁTICO                             │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                          EMPTYTRASH SYSTEM                                │
+└──────────────────────────────────────────────────────────────────────────┘
 
-    Usuario presiona "Comenzar" en Frontend
+┌─────────────────┐
+│   NAVEGADOR     │
+│  (localhost:    │ ← HTTP → ┌────────────────────┐
+│     3000)       │          │    Nginx Proxy     │
+└─────────────────┘          │   (Frontend)       │
+                             └──────────┬─────────┘
+                                        │
+                                        │ Sirve
+                                        ↓
+                             ┌────────────────────┐
+                             │  React + Vite      │
+                             │  + Leaflet Maps    │
+                             └──────────┬─────────┘
+                                        │
+                                        │ API Calls
+                                        │ (/api/*)
+                                        ↓
+                             ┌────────────────────┐
+                             │  Backend API       │
+                             │  Node.js Express   │
+                             │  (Puerto 3001)     │
+                             └──────┬─────┬───────┘
+                                    │     │
+                    ┌───────────────┘     └──────────────┐
+                    ↓                                     ↓
+         ┌──────────────────┐                  ┌─────────────────┐
+         │   PostgreSQL     │                  │   RabbitMQ      │
+         │   (mi_base)      │                  │  Message Broker │
+         │  Puerto 5432     │                  │  Puerto 5672    │
+         └──────────────────┘                  └────────┬────────┘
+                 ↑                                      │
+                 │                         ┌────────────┼────────────┐
+                 │                         │            │            │
+                 │                         ↓            ↓            ↓
+                 │              ┌───────────────┐ ┌──────────┐ ┌─────────┐
+                 │              │ sender-signals│ │ provider-│ │consumers│
+                 │              │   (Node.js)   │ │   full   │ │ (Java + │
+                 │              │ Auto cada 30s │ │containers│ │ Python) │
+                 │              └───────────────┘ │(Node.js) │ └─────────┘
+                 │                                └──────────┘
+                 │                                      │
+                 └──────────────────────────────────────┘
+                           Actualiza datos
+```
+
+### Arquitectura de Microservicios
+
+El sistema está compuesto por **8 servicios independientes**:
+
+| # | Servicio | Tipo | Lenguaje | Función Principal |
+|---|----------|------|----------|-------------------|
+| 1 | **frontend** | Web UI | React | Interfaz de usuario |
+| 2 | **backend** | API REST | Node.js | Orquestación y lógica de negocio |
+| 3 | **sender-signals** | Producer | Node.js | Generador automático de sensores IoT |
+| 4 | **provider-full-containers** | Producer | Node.js | Consulta y publica contenedores llenos |
+| 5 | **consumer-signals** | Consumer | Java | Procesa señales y actualiza DB |
+| 6 | **consumer-full-containers** | Consumer | Python | Calcula rutas óptimas (OR-Tools) |
+| 7 | **rabbitmq** | Message Broker | Erlang | Comunicación asíncrona |
+| 8 | **db** | Database | PostgreSQL | Persistencia de datos |
+
+---
+
+## 🔄 Flujo de Datos Detallado
+
+### Fase 1: Generación Automática de Datos (Continua)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  CADA 30 SEGUNDOS (Automático)                                  │
+└─────────────────────────────────────────────────────────────────┘
+
+  [T+0s]  sender-signals ejecuta
+           ↓
+  [T+0s]  Selecciona 8-15 contenedores aleatorios
+           ↓
+  [T+0s]  Genera porcentajes:
+           • Seleccionados: 75-100%
+           • No seleccionados: 0-74%
+           ↓
+  [T+1s]  Publica 15 mensajes → Cola "signals"
+           ↓
+           ┌──────────────────────────────┐
+           │  Queue: signals              │
+           │  Messages: 15 contenedores   │
+           └──────────┬───────────────────┘
+                      ↓
+  [T+1s]  consumer-signals (Java) procesa
+           ↓
+  [T+2s]  Ejecuta: INSERT INTO contenedores ... ON CONFLICT UPDATE
+           ↓
+           ┌──────────────────────────────┐
+           │  PostgreSQL: contenedores    │
+           │  15 filas actualizadas       │
+           └──────────────────────────────┘
+
+  [T+30s] ⟲ Repite el ciclo
+```
+
+### Fase 2: Cálculo de Ruta (Disparado por Usuario)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Usuario presiona "Comenzar Ruta" en Frontend                   │
+└─────────────────────────────────────────────────────────────────┘
+
+  [0s]  Frontend → POST /api/iniciar-flujo
+         ↓
+  [0s]  Backend recibe petición
+         ↓
+  [0s]  Backend → POST http://provider-full-containers:3003/consultar-contenedores
+         ↓
+  [1s]  provider-full-containers:
+         ├─ Query: SELECT * FROM contenedores WHERE porcentaje >= 75
+         ├─ Encuentra N contenedores (N >= 8)
+         ├─ Publica cada contenedor → Cola "fullcontainers"
+         └─ Publica señal final: {id: -1, timestamp: ...}
+         ↓
+         ┌────────────────────────────────────┐
+         │  Queue: fullcontainers             │
+         │  Messages: N + 1 (señal -1)        │
+         └──────────┬─────────────────────────┘
                     ↓
-    ┌──────────────────────────────────────┐
-    │   Backend Node.js (app/backend/)     │
-    │   Puerto: 4000                       │
-    └──────────────────────────────────────┘
+  [2s]  consumer-full-containers (Python):
+         ├─ Recibe N contenedores
+         ├─ Almacena en memoria: contenedores_llenos = []
+         ├─ Al recibir id=-1:
+         │   ├─ Calcula ruta con OR-Tools (VRP)
+         │   ├─ Optimiza distancias y tiempos
+         │   └─ Genera JSON con ruta ordenada
+         └─ Guarda en DB: INSERT INTO rutas (ruta, cantidad, tiempo, fecha)
+         ↓
+         ┌────────────────────────────────────┐
+         │  PostgreSQL: rutas                 │
+         │  Nueva fila con ruta calculada     │
+         └──────────┬─────────────────────────┘
                     ↓
-    ┌──────────────────────────────────────┐
-    │  PASO 1: ejecutarSenderSignals()     │
-    │  - Consulta 15 contenedores de BD    │
-    │  - Selecciona 8 aleatorios           │
-    │  - Fuerza porcentaje >= 75%          │
-    │  - Publica a cola "signals"          │
-    └──────────────────────────────────────┘
-                    ↓
-          Cola RabbitMQ: "signals"
-                    ↓
-    ┌──────────────────────────────────────┐
-    │  Consumer-Signals (Java)             │
-    │  - Recibe mensajes                   │
-    │  - Actualiza BD (INSERT ON CONFLICT) │
-    └──────────────────────────────────────┘
-                    ↓
-              PostgreSQL
-                    ↓
-    ┌──────────────────────────────────────┐
-    │  PASO 2: ejecutarProviderFull...()   │
-    │  - Consulta contenedores >= 75%      │
-    │  - Publica cada uno a cola           │
-    │  - Envía señal -1 (trigger cálculo)  │
-    └──────────────────────────────────────┘
-                    ↓
-        Cola RabbitMQ: "fullcontainers"
-                    ↓
-    ┌──────────────────────────────────────┐
-    │  Consumer-Full-Containers (Python)   │
-    │  - Recibe contenedores llenos        │
-    │  - Calcula ruta óptima (OR-Tools)    │
-    │  - Publica ruta a cola               │
-    └──────────────────────────────────────┘
-                    ↓
-      Cola RabbitMQ: "containerstoclean"
-                    ↓
-    ┌──────────────────────────────────────┐
-    │  Backend: routeConsumer.js           │
-    │  - Escucha cola en segundo plano     │
-    │  - Actualiza variable ultimaRuta     │
-    └──────────────────────────────────────┘
-                    ↓
-    ┌──────────────────────────────────────┐
-    │  Frontend React                      │
-    │  - Muestra mapa con ruta             │
-    │  - Navegación por contenedores       │
-    │  - Botón "Finalizar Ruta"            │
-    └──────────────────────────────────────┘
+  [5s]  Backend (polling cada 500ms):
+         ├─ Query: SELECT * FROM rutas WHERE fecha_calculo >= tiempoInicio
+         ├─ Encuentra nueva ruta
+         └─ Retorna ruta completa al Frontend
+         ↓
+  [6s]  Frontend:
+         ├─ Recibe JSON con ruta
+         ├─ Renderiza mapa Leaflet
+         ├─ Muestra N contenedores
+         └─ Habilita navegación
+```
+
+### Fase 3: Finalización de Ruta
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Usuario presiona "Finalizar Ruta" en Frontend                  │
+└─────────────────────────────────────────────────────────────────┘
+
+  [0s]  Frontend → POST /api/ruta/completar
+         ↓
+  [0s]  Backend:
+         ├─ Extrae IDs de contenedores de la ruta
+         └─ UPDATE contenedores SET porcentaje = 0 WHERE id IN (...)
+         ↓
+         ┌────────────────────────────────────┐
+         │  PostgreSQL: contenedores          │
+         │  N contenedores vaciados (0%)      │
+         └────────────────────────────────────┘
+         ↓
+  [1s]  Frontend vuelve a WelcomeScreen
+         ↓
+  [30s] ⟲ sender-signals genera nuevos datos
 ```
 
 ---
 
-## ⚡ Flujo Automático
+## 🔧 Componentes del Sistema
 
-### Inicio del Flujo
-1. Usuario abre http://localhost:3000
-2. Presiona botón **"Comenzar"** en WelcomeScreen
-3. Frontend hace POST a `/api/iniciar-flujo`
-4. Backend ejecuta todo el proceso automáticamente
+### 1. Frontend (React + Vite)
 
-### Proceso Completo (≈15 segundos)
-```bash
-[0s]   POST /api/iniciar-flujo recibido
-[0s]   ↓ Ejecutando senderSignals.js
-[1s]   ✓ 15 sensores procesados (8 contenedores forzados a >= 75%)
-[1s]   ↓ Esperando 5 segundos para procesamiento...
-[6s]   ↓ Ejecutando providerFullContainers.js
-[7s]   ✓ 8 contenedores enviados a cola + señal -1
-[7s]   ↓ Esperando cálculo de ruta (máx 30s)...
-[12s]  ✓ Ruta recibida desde Python consumer
-[12s]  ✓ Respuesta JSON enviada al frontend
-[13s]  ✓ Mapa mostrado con 8 contenedores
+**Ubicación:** `frontend/`  
+**Imagen Docker:** Nginx Alpine  
+**Puerto:** 3000
+
+**Responsabilidades:**
+- Renderizar interfaz de usuario
+- Mostrar mapa interactivo con Leaflet
+- Gestionar navegación entre contenedores
+- Comunicarse con Backend API vía HTTP
+
+**Componentes Clave:**
 ```
-
-### Navegación de Ruta
-- **Botón "Siguiente Contenedor"**: Avanza al siguiente punto
-- **Mapa fijo**: No se mueve automáticamente (usuario controla zoom/scroll)
-- **Marcadores visuales**:
-  - 🟢 Verde = Contenedor actual
-  - 🔵 Azul = Pendientes
-  - ⚪ Gris = Ya recogidos
-
-### Finalizar Ruta
-1. Usuario llega al último contenedor
-2. Presiona botón **"Finalizar Ruta"**
-3. Backend hace POST a `/api/ruta/completar`
-4. Actualiza BD: `UPDATE contenedores SET porcentaje = 0`
-5. Vuelve a WelcomeScreen para nueva ejecución
-
----
-
-## 🟢 Componentes Activos
-
-### 1. app (Backend + Frontend)
-**Contenedor:** `obligatorio-contenedores-app-1`  
-**Puerto:** 3000 (HTTP), 4000 (API interna)
-
-#### Backend Node.js
-```
-app/backend/
-├── server.js                    # API REST principal
-├── config/
-│   ├── database.js              # Config PostgreSQL
-│   └── rabbitmq.js              # Config RabbitMQ + nombres de colas
-├── providers/
-│   ├── senderSignals.js         # Simula 15 sensores (reemplaza Java)
-│   └── providerFullContainers.js # Publica contenedores llenos (reemplaza Java)
-└── services/
-    └── routeConsumer.js         # Escucha cola "containerstoclean"
-```
-
-**Endpoints:**
-- `POST /api/iniciar-flujo` - Inicia todo el proceso automático
-- `GET /api/ruta` - Obtiene la última ruta calculada
-- `POST /api/ruta/completar` - Vacía contenedores y finaliza ruta
-- `GET /api/health` - Health check
-
-#### Frontend React
-```
-app/frontend/src/
-├── App.jsx                      # Lógica principal + estado
+src/
+├── App.jsx                  # Estado global y lógica de flujo
 ├── components/
-│   ├── WelcomeScreen.jsx        # Pantalla inicial con botón "Comenzar"
-│   ├── MapView.jsx              # Mapa Leaflet con marcadores
-│   └── ControlPanel.jsx         # Botones "Siguiente" y "Finalizar"
+│   ├── WelcomeScreen.jsx   # Pantalla inicial con botón "Comenzar"
+│   ├── MapView.jsx         # Mapa Leaflet con marcadores
+│   └── ControlPanel.jsx    # Botones de navegación
 └── main.jsx
 ```
 
-### 2. consumer-signals (Java)
-**Contenedor:** `obligatorio-contenedores-consumer-signals-1`  
-**Cola:** `signals`
-
-**Función:**
-- Escucha mensajes de sensores: `{id, latitud, longitud, porcentaje}`
-- Inserta/actualiza en PostgreSQL usando `INSERT ON CONFLICT`
-- Corre permanentemente
-
-### 3. consumer-full-containers (Python)
-**Contenedor:** `obligatorio-contenedores-consumer-full-containers-1`  
-**Cola:** `fullcontainers`
-
-**Función:**
-- Recibe contenedores llenos (>= 75%)
-- Espera señal `-1` para calcular ruta
-- Usa OR-Tools para optimización
-- Publica ruta a cola `containerstoclean`
-- Se resetea automáticamente para nueva ejecución
-
-### 4. db (PostgreSQL)
-**Contenedor:** `obligatorio-contenedores-db-1`  
-**Puerto:** 5432  
-**Base de datos:** `mi_base`  
-**Persistencia:** ✅ Volumen `./init.sql` inicializa la tabla
-
-**Tabla:**
-```sql
-CREATE TABLE contenedores (
-    id SERIAL PRIMARY KEY,
-    latitud DECIMAL(10, 8) NOT NULL,
-    longitud DECIMAL(11, 8) NOT NULL,
-    porcentaje INTEGER NOT NULL
-);
-```
-
-### 5. rabbitmq
-**Contenedor:** `obligatorio-contenedores-rabbitmq-1`  
-**Puertos:** 5672 (AMQP), 15672 (Management UI)  
-**Credenciales:** `user` / `pass`  
-**Persistencia:** ✅ Volumen `rabbitmq_data` para mensajes y configuración
-
-**Ventajas de la persistencia:**
-- Los mensajes sobreviven a reinicios del contenedor
-- Las colas declaradas se mantienen
-- Útil para debugging y análisis de flujo
+**Endpoints que consume:**
+- `POST /api/iniciar-flujo` - Inicia el proceso completo
+- `GET /api/ruta` - Obtiene ruta calculada (solo si necesita)
+- `POST /api/ruta/completar` - Finaliza y vacía contenedores
 
 ---
 
-## 🔴 Componentes Legacy (No Activos)
+### 2. Backend (Node.js + Express)
 
-Estos componentes existen en el código pero **NO se ejecutan** en el flujo automático:
+**Ubicación:** `backend/`  
+**Imagen Docker:** Node.js 20 Alpine  
+**Puerto:** 3001
 
-### ❌ producers/sender-signals/ (Java)
-- **Estado:** Definido en docker-compose, no corre
-- **Reemplazado por:** `app/backend/providers/senderSignals.js`
-- **Uso original:** Flujo manual con `docker compose run --rm sender-signals`
+**Responsabilidades:**
+- Orquestar el flujo completo
+- Actuar como API Gateway
+- Comunicarse con provider-full-containers
+- Hacer polling a PostgreSQL
+- Gestionar estado de rutas
 
-### ❌ producers/providerFullContainers/ (Java)
-- **Estado:** Definido en docker-compose, no corre
-- **Reemplazado por:** `app/backend/providers/providerFullContainers.js`
-- **Uso original:** Flujo manual con `docker compose run --rm provider-full-containers`
+**Estructura:**
+```
+backend/
+├── server.js               # API REST principal
+├── config/
+│   ├── database.js        # Pool de conexiones PostgreSQL
+│   └── rabbitmq.js        # (No usado directamente)
+└── package.json
+```
 
-### ❌ consumers/consumerContainersToClean/ (Python)
-- **Estado:** NO definido en docker-compose
-- **Reemplazado por:** `app/backend/services/routeConsumer.js`
-- **Razón:** El backend escucha directamente la cola
+**Endpoints principales:**
+```javascript
+POST /api/iniciar-flujo
+  ├─ Llama a provider-full-containers HTTP
+  ├─ Espera ruta en DB (polling)
+  └─ Retorna ruta completa
 
-### ❌ common/ (Configuración Java compartida)
-- **Estado:** Solo usada por producers Java que no corren
-- **Mantener:** Por si se quiere usar flujo manual
+GET /api/ruta
+  └─ Retorna última ruta calculada desde DB
+
+POST /api/ruta/completar
+  ├─ Recibe IDs de contenedores
+  └─ UPDATE ... SET porcentaje = 0
+```
+
+---
+
+### 3. sender-signals (Node.js Producer)
+
+**Ubicación:** `producers/sender-signals-js/`  
+**Imagen Docker:** Node.js 20 Alpine  
+**Ejecución:** Automática cada 30 segundos
+
+**Responsabilidades:**
+- Simular sensores IoT en tiempo real
+- Generar datos de 15 contenedores
+- Seleccionar aleatoriamente 8-15 para llenar
+- Publicar a cola RabbitMQ
+
+**Algoritmo:**
+```javascript
+setInterval(() => {
+  // 1. Seleccionar 8-15 contenedores aleatorios
+  const cantidadALlenar = Math.floor(Math.random() * 8) + 8;
+  
+  // 2. Fisher-Yates shuffle para selección sin repetición
+  const indicesALlenar = shuffleArray([0,1,2,...,14]).slice(0, cantidadALlenar);
+  
+  // 3. Generar porcentajes
+  contenedores.forEach((c, i) => {
+    if (indicesALlenar.includes(i)) {
+      c.porcentaje = Math.floor(Math.random() * 26) + 75; // 75-100%
+    } else {
+      c.porcentaje = Math.floor(Math.random() * 75); // 0-74%
+    }
+  });
+  
+  // 4. Publicar a RabbitMQ
+  contenedores.forEach(c => {
+    channel.sendToQueue('signals', Buffer.from(JSON.stringify(c)));
+  });
+}, 30000);
+```
+
+**Coordenadas Fijas:**
+```javascript
+const contenedores = [
+  { id: 1,  latitud: -34.9065, longitud: -56.2040 },
+  { id: 2,  latitud: -34.9060, longitud: -56.1860 },
+  // ... 15 ubicaciones en Montevideo
+];
+```
+
+---
+
+### 4. provider-full-containers (Node.js HTTP Server)
+
+**Ubicación:** `producers/provider-full-containers-js/`  
+**Imagen Docker:** Node.js 20 Alpine  
+**Puerto:** 3003
+
+**Responsabilidades:**
+- Exponer HTTP endpoint `/consultar-contenedores`
+- Consultar PostgreSQL por contenedores >= 75%
+- Publicar a RabbitMQ
+- Detectar cuando no hay contenedores llenos
+
+**Endpoint:**
+```javascript
+POST /consultar-contenedores
+  ├─ Query: SELECT * FROM contenedores WHERE porcentaje >= 75
+  ├─ Si no hay resultados:
+  │   └─ Retorna: {hasContainers: false, count: 0}
+  ├─ Si hay resultados:
+  │   ├─ Publica cada contenedor a 'fullcontainers'
+  │   ├─ Publica señal: {id: -1, timestamp: ...}
+  │   └─ Retorna: {hasContainers: true, count: N}
+```
+
+---
+
+### 5. consumer-signals (Java Consumer)
+
+**Ubicación:** `consumers/consumer-signals/`  
+**Imagen Docker:** Eclipse Temurin 11 Alpine  
+**Cola:** `signals`
+
+**Responsabilidades:**
+- Procesar señales de sensores
+- Actualizar PostgreSQL con UPSERT
+- Correr indefinidamente
+
+**Lógica:**
+```java
+@RabbitListener(queues = "signals")
+public void processSensorData(String message) {
+    SensorData data = parseJson(message);
+    
+    // UPSERT: Insertar o actualizar si existe
+    String sql = "INSERT INTO contenedores (id, latitud, longitud, porcentaje) " +
+                 "VALUES (?, ?, ?, ?) " +
+                 "ON CONFLICT (id) DO UPDATE SET " +
+                 "latitud = EXCLUDED.latitud, " +
+                 "longitud = EXCLUDED.longitud, " +
+                 "porcentaje = EXCLUDED.porcentaje";
+    
+    jdbcTemplate.update(sql, data.id, data.latitud, data.longitud, data.porcentaje);
+}
+```
+
+---
+
+### 6. consumer-full-containers (Python Consumer)
+
+**Ubicación:** `consumers/consumerFullContainers/`  
+**Imagen Docker:** Python 3.9 Slim  
+**Cola:** `fullcontainers`
+
+**Responsabilidades:**
+- Recibir contenedores llenos
+- Calcular ruta óptima con OR-Tools
+- Guardar ruta en PostgreSQL
+
+**Algoritmo OR-Tools (VRP):**
+```python
+def calculate_route(containers):
+    # 1. Crear matriz de distancias (Haversine)
+    distance_matrix = compute_distances(containers)
+    
+    # 2. Configurar modelo OR-Tools
+    manager = pywrapcp.RoutingIndexManager(len(containers), 1, 0)
+    routing = pywrapcp.RoutingModel(manager)
+    
+    # 3. Registrar callback de distancia
+    def distance_callback(from_index, to_index):
+        from_node = manager.IndexToNode(from_index)
+        to_node = manager.IndexToNode(to_index)
+        return distance_matrix[from_node][to_node]
+    
+    transit_callback_index = routing.RegisterTransitCallback(distance_callback)
+    routing.SetArcCostEvaluatorOfAllVehicles(transit_callback_index)
+    
+    # 4. Resolver
+    search_parameters = pywrapcp.DefaultRoutingSearchParameters()
+    solution = routing.SolveWithParameters(search_parameters)
+    
+    # 5. Extraer ruta ordenada
+    route = extract_solution(solution, manager, routing)
+    
+    # 6. Guardar en DB
+    save_to_database(route)
+```
+
+---
+
+### 7. RabbitMQ (Message Broker)
+
+**Imagen Docker:** RabbitMQ 3 Management  
+**Puertos:** 5672 (AMQP), 15672 (Web UI)  
+**Credenciales:** user / pass
+
+**Colas:**
+1. **signals** - Señales de sensores (15 mensajes cada 30s)
+2. **fullcontainers** - Contenedores llenos + señal -1
+3. **containerstoclean** - *(Legacy, no usada)*
+
+**Persistencia:** Volumen `rabbitmq_data`
+
+---
+
+### 8. PostgreSQL (Base de Datos)
+
+**Imagen Docker:** PostgreSQL 15 Alpine  
+**Puerto:** 5432  
+**Base de datos:** mi_base
+
+**Tablas:**
+
+```sql
+-- Tabla de contenedores
+CREATE TABLE contenedores (
+    id INTEGER PRIMARY KEY,
+    latitud NUMERIC(10, 8) NOT NULL,
+    longitud NUMERIC(11, 8) NOT NULL,
+    porcentaje INTEGER NOT NULL CHECK (porcentaje >= 0 AND porcentaje <= 100)
+);
+
+-- Tabla de rutas
+CREATE TABLE rutas (
+    id SERIAL PRIMARY KEY,
+    cantidad_contenedores INTEGER NOT NULL,
+    tiempo_total_minutos NUMERIC NOT NULL,
+    ruta JSONB NOT NULL,
+    fecha_calculo TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**Persistencia:** Volumen `postgres_data`
+
+---
+
+## 🔗 Comunicación Entre Servicios
+
+### 1. Comunicación Síncrona (HTTP)
+
+```
+Frontend ←─ HTTP ─→ Nginx ←─ Proxy ─→ Backend
+                                      ↓
+                                      HTTP POST
+                                      ↓
+                              provider-full-containers:3003
+```
+
+### 2. Comunicación Asíncrona (RabbitMQ)
+
+```
+sender-signals ──→ Queue: signals ──→ consumer-signals
+                                              ↓
+                                        PostgreSQL
+
+provider-full-containers ──→ Queue: fullcontainers ──→ consumer-full-containers
+                                                              ↓
+                                                        PostgreSQL: rutas
+```
+
+### 3. Comunicación con Base de Datos
+
+```
+┌────────────────────┐
+│   PostgreSQL       │
+└─────────┬──────────┘
+          │
+          ├─── consumer-signals (Java/JDBC) - WRITE
+          ├─── consumer-full-containers (Python/psycopg2) - WRITE
+          ├─── provider-full-containers (Node.js/pg) - READ
+          └─── backend (Node.js/pg) - READ/WRITE
+```
+
+---
+
+## 📊 Base de Datos
+
+### Esquema Completo
+
+```sql
+-- Contenedores (estado actual)
+CREATE TABLE contenedores (
+    id INTEGER PRIMARY KEY,              -- ID fijo 1-15
+    latitud NUMERIC(10, 8) NOT NULL,     -- Coordenada fija
+    longitud NUMERIC(11, 8) NOT NULL,    -- Coordenada fija
+    porcentaje INTEGER NOT NULL          -- Variable 0-100%
+    CHECK (porcentaje >= 0 AND porcentaje <= 100)
+);
+
+-- Rutas calculadas (historial)
+CREATE TABLE rutas (
+    id SERIAL PRIMARY KEY,
+    cantidad_contenedores INTEGER NOT NULL,
+    tiempo_total_minutos NUMERIC NOT NULL,
+    ruta JSONB NOT NULL,                 -- Array de contenedores ordenados
+    fecha_calculo TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Índices para performance
+CREATE INDEX idx_contenedores_porcentaje ON contenedores(porcentaje);
+CREATE INDEX idx_rutas_fecha ON rutas(fecha_calculo DESC);
+```
+
+### Ejemplo de Datos
+
+**Tabla `contenedores`:**
+```
+ id │  latitud  │ longitud  │ porcentaje 
+────┼───────────┼───────────┼────────────
+  1 │ -34.9065  │ -56.2040  │     84
+  2 │ -34.9060  │ -56.1860  │     12
+  3 │ -34.9055  │ -56.1755  │     91
+  4 │ -34.8945  │ -56.1645  │     78
+...
+```
+
+**Tabla `rutas`:**
+```json
+{
+  "id": 42,
+  "cantidad_contenedores": 8,
+  "tiempo_total_minutos": 12.45,
+  "ruta": [
+    {"id": 3, "latitud": -34.9055, "longitud": -56.1755, "porcentaje": 91},
+    {"id": 1, "latitud": -34.9065, "longitud": -56.2040, "porcentaje": 84},
+    {"id": 4, "latitud": -34.8945, "longitud": -56.1645, "porcentaje": 78}
+  ],
+  "fecha_calculo": "2025-11-07 14:32:18"
+}
+```
 
 ---
 
 ## 📨 Colas de RabbitMQ
 
-### 1. signals
-- **Publisher:** `app/backend/providers/senderSignals.js`
-- **Consumer:** `consumer-signals` (Java)
-- **Mensaje:**
+### Queue: `signals`
+
+**Propósito:** Transportar datos de sensores a consumidor Java
+
+**Publisher:** sender-signals (Node.js)  
+**Consumer:** consumer-signals (Java)  
+**Frecuencia:** 15 mensajes cada 30 segundos
+
+**Formato de Mensaje:**
 ```json
 {
-  "id": 1,
-  "latitud": -34.9011,
-  "longitud": -56.1645,
-  "porcentaje": 87
+  "id": 7,
+  "latitud": -34.9275,
+  "longitud": -56.1555,
+  "porcentaje": 83
 }
 ```
 
-### 2. fullcontainers
-- **Publisher:** `app/backend/providers/providerFullContainers.js`
-- **Consumer:** `consumer-full-containers` (Python)
-- **Mensajes:**
+**Durabilidad:** No durable (mensajes se pierden si RabbitMQ reinicia)  
+**Comportamiento:** Procesamiento inmediato, no hay buffer
+
+---
+
+### Queue: `fullcontainers`
+
+**Propósito:** Transportar contenedores llenos + señal de cálculo
+
+**Publisher:** provider-full-containers (Node.js)  
+**Consumer:** consumer-full-containers (Python)  
+**Frecuencia:** On-demand (cuando usuario presiona "Comenzar")
+
+**Formato de Mensajes:**
+
+1. **Contenedor lleno:**
 ```json
-// Contenedor lleno
 {
-  "id": 3,
-  "latitud": -34.8814,
+  "id": 12,
+  "latitud": -34.8825,
   "longitud": -56.1630,
-  "porcentaje": 91
+  "porcentaje": 95
 }
-
-// Señal de cálculo
-{"id": -1}
 ```
 
-### 3. containerstoclean
-- **Publisher:** `consumer-full-containers` (Python)
-- **Consumer:** `app/backend/services/routeConsumer.js`
-- **Mensaje:**
+2. **Señal de cálculo:**
 ```json
 {
-  "ruta": [
-    {"id": 1, "latitud": -34.9177, "longitud": -56.1602, "porcentaje": 83},
-    {"id": 7, "latitud": -34.9038, "longitud": -56.1646, "porcentaje": 81},
-    ...
-  ],
-  "cantidad_contenedores": 8,
-  "tiempo_total_minutos": 30.8,
-  "tiempo_total_segundos": 1848
+  "id": -1,
+  "timestamp": "2025-11-07T14:30:00.000Z"
 }
 ```
 
----
-
-## 🚀 Inicio Rápido
-
-### Prerrequisitos
-- Docker Desktop
-- Docker Compose
-
-### Levantar el Sistema
-```bash
-cd "Obligatorio - contenedores"
-docker compose up -d
-```
-
-**Servicios que inician:**
-- ✅ rabbitmq (puerto 5672, 15672) - **Con volumen persistente**
-- ✅ db (puerto 5432) - **Con volumen persistente**
-- ✅ consumer-signals (escuchando cola)
-- ✅ consumer-full-containers (escuchando cola)
-- ✅ app (frontend + backend, puerto 3000)
-
-**Nota sobre persistencia:**
-- RabbitMQ: Los mensajes y colas persisten entre reinicios
-- PostgreSQL: Los datos de contenedores persisten entre reinicios
-- Para reset completo: `docker compose down -v` (elimina volúmenes)
-
-### Usar la Aplicación
-1. Abrir navegador: http://localhost:3000
-2. Presionar botón **"Comenzar"**
-3. Esperar 10-15 segundos
-4. Ver mapa con ruta calculada
-5. Navegar por contenedores con botón **"Siguiente"**
-6. Al finalizar, presionar **"Finalizar Ruta"**
-
-### Monitoreo
-
-#### Ver Colas en RabbitMQ
-```
-URL: http://localhost:15672
-User: user
-Pass: pass
-```
-
-#### Ver Logs
-```bash
-# Backend
-docker logs obligatorio-contenedores-app-1 -f
-
-# Consumer signals (Java)
-docker logs obligatorio-contenedores-consumer-signals-1 -f
-
-# Consumer full containers (Python)
-docker logs obligatorio-contenedores-consumer-full-containers-1 -f
-```
-
-#### Consultar Base de Datos
-```bash
-docker exec -it obligatorio-contenedores-db-1 psql -U postgres -d mi_base
-
-# Ver contenedores
-SELECT id, porcentaje FROM contenedores ORDER BY porcentaje DESC;
-```
-
-### Detener el Sistema
-```bash
-docker compose down
-```
+**Durabilidad:** No durable  
+**Comportamiento:** Buffer hasta señal -1, luego calcula ruta
 
 ---
 
-## 🔧 Desarrollo
+### Queue: `containerstoclean` (Legacy)
 
-### Modificar Backend
-```bash
-cd app/backend
-# Editar archivos en providers/, services/, etc.
+**Estado:** No usada en la versión actual  
+**Razón:** Backend consulta directamente PostgreSQL en lugar de escuchar esta cola
 
-# Reconstruir
-cd ../..
-docker compose build app
-docker compose up -d app
+---
+
+## 💡 Decisiones de Diseño
+
+### 1. ¿Por qué Generación Automática cada 30 segundos?
+
+**Problema Original:** Usuario debía activar manualmente los sensores.
+
+**Solución:** 
+- `sender-signals` corre indefinidamente con `setInterval(30000)`
+- Simula comportamiento real de sensores IoT
+- Permite múltiples ejecuciones sin intervención manual
+
+**Beneficios:**
+- ✅ Más realista
+- ✅ Menos pasos para el usuario
+- ✅ Datos siempre frescos
+
+---
+
+### 2. ¿Por qué HTTP en lugar de RabbitMQ para provider-full-containers?
+
+**Problema:** Backend necesita saber si hay contenedores llenos antes de esperar la ruta.
+
+**Solución:** Convertir `provider-full-containers` en HTTP server
+
+**Ventajas:**
+- ✅ Respuesta síncrona: `{hasContainers: true/false, count: N}`
+- ✅ Backend puede mostrar error si no hay contenedores
+- ✅ Evita esperas innecesarias de 10 segundos
+
+**Desventaja:**
+- ❌ Introduce HTTP en arquitectura basada en mensajería
+
+---
+
+### 3. ¿Por qué Polling en Backend en lugar de Consumer?
+
+**Problema:** Consumer Python guarda ruta en DB pero backend no se entera.
+
+**Solución:** Backend hace polling cada 500ms durante máximo 10 segundos
+
+```javascript
+while (intentos < 20 && !ruta) {
+  await sleep(500);
+  const result = await db.query('SELECT * FROM rutas WHERE fecha_calculo >= $1', [tiempoInicio]);
+  if (result.rows.length > 0) {
+    ruta = result.rows[0];
+    break;
+  }
+  intentos++;
+}
 ```
 
-### Modificar Frontend
-```bash
-cd app/frontend
-# Editar archivos en src/
+**Ventajas:**
+- ✅ Backend puede retornar ruta completa en una sola petición HTTP
+- ✅ Frontend no necesita hacer polling
+- ✅ Uso de timestamp garantiza ruta nueva
 
-# Reconstruir
-cd ../..
-docker compose build app
-docker compose up -d app
+**Desventajas:**
+- ❌ Polling consume recursos
+- ❌ Latencia de hasta 500ms
+
+**Alternativas consideradas:**
+- ❌ WebSockets: Complejidad innecesaria
+- ❌ Consumer RabbitMQ: Requeriría estado compartido
+
+---
+
+### 4. ¿Por qué Coordenadas Fijas?
+
+**Problema:** Coordenadas aleatorias hacían difícil testear rutas.
+
+**Solución:** 15 ubicaciones fijas en Montevideo, solo porcentaje varía
+
+**Ventajas:**
+- ✅ Rutas reproducibles
+- ✅ Fácil debugging
+- ✅ Visualización consistente en mapa
+
+---
+
+### 5. ¿Por qué 8-15 Contenedores Llenos en lugar de siempre 8?
+
+**Problema:** Siempre 8 contenedores llenos es poco realista.
+
+**Solución:** 
+```javascript
+const cantidadALlenar = Math.floor(Math.random() * 8) + 8; // 8-15
 ```
 
-### Resetear Contenedores a 0%
-```bash
-docker exec -it obligatorio-contenedores-db-1 psql -U postgres -d mi_base -c "UPDATE contenedores SET porcentaje = 0;"
+**Ventajas:**
+- ✅ Más realista
+- ✅ Rutas variables
+- ✅ Garantiza mínimo 8 para tener ruta calculable
+
+---
+
+### 6. ¿Por qué PostgreSQL JSONB para rutas?
+
+**Problema:** Ruta es un array de objetos, difícil de modelar con SQL tradicional.
+
+**Solución:** Usar tipo `JSONB` en PostgreSQL
+
+**Ventajas:**
+- ✅ Flexibilidad: estructura de ruta puede cambiar
+- ✅ Performance: JSONB es binario, más rápido que JSON text
+- ✅ Queries: `jsonb_pretty()`, `jsonb_array_elements()`, etc.
+
+**Ejemplo:**
+```sql
+SELECT jsonb_pretty(ruta) FROM rutas ORDER BY fecha_calculo DESC LIMIT 1;
 ```
 
 ---
 
-## 📊 Tecnologías Utilizadas
+### 7. ¿Por qué Manejo de "No Contenedores Llenos"?
 
-### Backend
-- **Node.js 20** - Runtime
-- **Express 4.18** - Framework web
-- **amqplib 0.10** - Cliente RabbitMQ
-- **pg 8.11** - Cliente PostgreSQL
-- **Supervisor** - Gestor de procesos
+**Problema:** Si usuario presiona "Comenzar" justo después de finalizar una ruta, todos los contenedores están vacíos.
 
-### Frontend
-- **React 18** - Framework UI
-- **Vite** - Build tool
-- **Leaflet** - Mapas interactivos
-- **react-leaflet** - Componentes React para Leaflet
+**Solución:**
+- provider-full-containers retorna `{hasContainers: false}`
+- Backend detecta esto y retorna error amigable
+- Frontend muestra alert: "Espera a que los sensores generen nuevos datos"
 
-### Consumers
-- **Java 11+** - consumer-signals
-- **Python 3.9+** - consumer-full-containers
-- **OR-Tools** - Optimización de rutas
-
-### Infraestructura
-- **RabbitMQ 3** - Message broker
-- **PostgreSQL 15** - Base de datos
-- **Nginx** - Web server + reverse proxy
-- **Docker** - Containerización
+**Ventajas:**
+- ✅ UX mejorada
+- ✅ No se queda en "Iniciando Sistema"
+- ✅ Usuario entiende qué pasó
 
 ---
 
-## 📝 Notas Adicionales
+## 📈 Escalabilidad y Mejoras Futuras
 
-### Selección Aleatoria de Contenedores
-El sistema **garantiza** que en cada ejecución:
-- Se seleccionan **8 contenedores aleatorios** de los 15 disponibles
-- Estos 8 se fuerzan a tener porcentaje **>= 75%**
-- Los demás tienen incremento aleatorio normal (1-5%)
+### Limitaciones Actuales
 
-Esto hace que cada ruta sea **diferente** y simula comportamiento real.
+1. **Polling en Backend**: Consumo de recursos innecesario
+2. **Sin autenticación**: Cualquiera puede acceder
+3. **Single point of failure**: Un solo backend
+4. **No hay retry logic**: Si RabbitMQ falla, se pierden mensajes
 
-### Ejecuciones Múltiples
-El sistema soporta **múltiples ejecuciones** sin reiniciar contenedores:
-- Al finalizar una ruta, los contenedores se vacían (porcentaje = 0)
-- La siguiente ejecución selecciona nuevos contenedores aleatorios
-- El consumer Python se resetea automáticamente
+### Mejoras Propuestas
 
-### Manejo de Errores
-- Si no hay contenedores >= 75%, el sistema espera hasta timeout (30s)
-- Si hay error en BD o RabbitMQ, se muestra mensaje al usuario
-- Todos los errores se registran en logs
+1. **WebSockets para notificaciones en tiempo real**
+   - Backend envía ruta cuando está lista
+   - Elimina polling
+
+2. **Kubernetes para orquestación**
+   - Múltiples replicas de backend
+   - Load balancing
+   - Auto-scaling
+
+3. **Redis para caché**
+   - Cachear rutas calculadas
+   - Reducir carga en PostgreSQL
+
+4. **Prometheus + Grafana para monitoreo**
+   - Métricas de colas RabbitMQ
+   - Latencia de endpoints
+   - Uso de DB
+
+5. **Circuit Breaker pattern**
+   - Si PostgreSQL falla, devolver error rápido
+   - Evitar timeouts
 
 ---
 
-## 🤝 Contribuir
+## 📚 Referencias
 
-Para agregar nuevas funcionalidades:
-1. Modificar código en `app/backend/` o `app/frontend/`
-2. Reconstruir contenedor `app`
-3. Probar flujo completo
-4. Actualizar esta documentación
+- **OR-Tools**: https://developers.google.com/optimization/routing/vrp
+- **RabbitMQ**: https://www.rabbitmq.com/documentation.html
+- **React Leaflet**: https://react-leaflet.js.org/
+- **PostgreSQL JSONB**: https://www.postgresql.org/docs/current/datatype-json.html
 
 ---
 
-## 📄 Licencia
-
-Este proyecto es parte de un trabajo académico.
+**Última actualización:** Noviembre 2025  
+**Versión:** 2.0 (Automatizada)
